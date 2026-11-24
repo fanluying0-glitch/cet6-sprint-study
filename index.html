@@ -189,7 +189,28 @@ textarea{resize:vertical;min-height:90px}.inline-form{display:flex;gap:8px;flex-
 .story-version {margin:7px 0 11px}
 .story-version > .audio {margin-top:8px}
 
+.ink-board {margin-top:9px}
+.ink-toolbar {padding:7px 0;gap:7px}
+.ink-tools {gap:5px}
+.ink-tools [aria-pressed="true"] {background:var(--faint);color:var(--green);border-color:#94af91}
+.ink-toolbar [data-ink-toggle][aria-pressed="true"] {color:white;background:var(--green)}
+.ink-board.is-annotating .ink-toolbar {position:sticky;top:72px;z-index:3;background:#fbfcf8;border-bottom:1px solid var(--line)}
+.ink-scroll {overflow-x:auto}
+.ink-paper {position:relative;width:100%}
+.ink-canvas {position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.ink-board.is-annotating .ink-canvas {pointer-events:auto;touch-action:none;user-select:none;-webkit-user-select:none;cursor:crosshair}
+.ink-board[data-ink-tool="eraser"] .ink-canvas {cursor:cell}
+.ink-paper .lookup-word {padding-inline:0}
+.ink-image {display:block;width:100%;height:auto}
+.ink-imported-text {margin:8px 0;white-space:pre-wrap;overflow-wrap:anywhere}
+.paper-workspace {margin-top:13px;background:#f9fcf6}
+.paper-upload {position:relative;overflow:hidden;cursor:pointer}
+.paper-upload input {position:absolute;inset:0;opacity:0;width:100%;height:100%;cursor:pointer}
+.paper-upload:focus-within {outline:3px solid #507f2c;outline-offset:3px}
+@media(max-width:600px){.ink-board.is-annotating .ink-toolbar{top:79px}}
+
 </style>
+
 
 
 
@@ -1120,6 +1141,7 @@ function realBoard(id,extra="") {
     +(listening?'<p>卷面 Part II Listening Comprehension · 第 1–25 题</p>':exactPaperRoute(scope)+vocabularyBridge(task[7],"真题里会遇到的今日词"))
     +'<div class="line-up">'+ext(listening?taskLink(task,"?layout=step&practice=listening"):readingLink(task),listening?"播放本套听力":"打开 "+scope.kind+" "+scope.number,"dark")+'</div><p>'+esc(task[5])+'</p></div>'
     +(!listening?'<div class="practice-timer"><h4>'+esc(scope.kind)+' · 第 '+esc(scope.number)+'</h4><div class="timer" data-real-clock="'+id+'">'+task[3]+':00</div><p class="meta" data-real-status="'+id+'">对上题号后开始计时</p><div class="line-up"><button class="soft" type="button" data-real-start="'+id+'">开始阅读 '+task[3]+' 分钟</button><button class="outline" type="button" data-real-stop="'+id+'">停表</button></div></div>':"")+'</div>'
+    +(listening?"":paperWorkspace("real-"+id))
     +'<form class="real-form" data-real-form="'+id+'">'+blocks+'<button class="dark" type="submit">核对本组'+(listening?"听力":"阅读")+'答案</button></form><div id="real-result-'+id+'">'+taskResult(id)+'</div>'+extra+'</div>';
 }
 function readGoal(scores) {
@@ -1258,6 +1280,319 @@ function coachPanel(day) {
 <script>
 "use strict";
 
+const inkStyles={
+  highlight:{colour:"rgba(255,199,48,.43)",width:13},
+  pen:{colour:"#1a628c",width:2.6}
+};
+const inkBoards=new Map();
+const paperCache=new Map();
+let paperDatabase;
+
+function inkMarkup(key,content) {
+  return '<div class="ink-board" data-ink-board="'+esc(key)+'"><div class="ink-toolbar line-up">'
+    +'<button type="button" class="soft" data-ink-toggle aria-pressed="false">开始标记</button>'
+    +'<div class="ink-tools line-up" role="group" aria-label="标记工具" hidden>'
+    +'<button type="button" class="outline" data-ink-tool="highlight" aria-pressed="true">荧光笔</button>'
+    +'<button type="button" class="outline" data-ink-tool="pen" aria-pressed="false">细笔</button>'
+    +'<button type="button" class="outline" data-ink-tool="eraser" aria-pressed="false">橡皮</button>'
+    +'<button type="button" class="outline" data-ink-undo disabled>撤销</button></div>'
+    +'<span class="meta ink-help" hidden>用 Apple Pencil 划线，手指滚动页面。</span></div>'
+    +'<div class="ink-scroll"><div class="ink-paper"><div class="ink-content">'+content+'</div>'
+    +'<canvas class="ink-canvas" aria-hidden="true" width="1" height="1"></canvas></div></div></div>';
+}
+function readInk(key) {
+  try {
+    const saved=JSON.parse(localStorage.getItem("cet6-ink-v1:"+key)||"null");
+    if(saved && Number.isFinite(saved.width) && Array.isArray(saved.strokes))return saved;
+  } catch {}
+  return {width:0,strokes:[]};
+}
+function saveInk(board) {
+  try {localStorage.setItem("cet6-ink-v1:"+board.key,JSON.stringify(board.data));}
+  catch {toast("浏览器未能保存这页笔迹。当前页面仍可以继续标记。");}
+}
+function syncInkBoards() {
+  for(const [node,board] of inkBoards){
+    if(!node.isConnected){board.resizeObserver?.disconnect();inkBoards.delete(node);}
+  }
+  document.querySelectorAll("[data-ink-board]").forEach(node=>{
+    if(!inkBoards.has(node)) mountInkBoard(node);
+  });
+  document.querySelectorAll("[data-paper-workspace]:not([data-paper-mounted])").forEach(mountPaperWorkspace);
+}
+function mountInkBoard(node) {
+  const paper=node.querySelector(".ink-paper"), canvas=node.querySelector("canvas");
+  const key=node.dataset.inkBoard;
+  const board={node,key,paper,canvas,ctx:canvas.getContext("2d"),scroll:node.querySelector(".ink-scroll"),
+    data:readInk(key),enabled:false,tool:"highlight",history:[],pointer:null,pan:null,raf:0};
+  if(!board.ctx)return;
+  inkBoards.set(node,board);
+  if(board.data.width>0)paper.style.width=board.data.width+"px";
+
+  const toggle=node.querySelector("[data-ink-toggle]");
+  const tools=node.querySelector(".ink-tools");
+  const help=node.querySelector(".ink-help");
+  const undo=node.querySelector("[data-ink-undo]");
+  toggle.addEventListener("click",()=>{
+    board.enabled=!board.enabled;
+    node.classList.toggle("is-annotating",board.enabled);
+    toggle.setAttribute("aria-pressed",String(board.enabled));
+    toggle.textContent=board.enabled?"退出标记":"开始标记";
+    tools.hidden=!board.enabled;
+    help.hidden=!board.enabled;
+    updateInkUndo(board);
+    paintInk(board);
+  });
+  for(const button of node.querySelectorAll("[data-ink-tool]")){
+    button.addEventListener("click",()=>{
+      board.tool=button.dataset.inkTool;
+      node.dataset.inkTool=board.tool;
+      for(const other of node.querySelectorAll("[data-ink-tool]"))other.setAttribute("aria-pressed",String(other===button));
+    });
+  }
+  undo.addEventListener("click",()=>{
+    const action=board.history.pop();
+    if(action?.removed){
+      for(const [index,stroke] of action.removed.reverse())board.data.strokes.splice(index,0,stroke);
+    }else{
+      board.data.strokes.pop();
+    }
+    refreshInk(board);
+  });
+  canvas.addEventListener("pointerdown",event=>beginInkPointer(board,event));
+  canvas.addEventListener("pointermove",event=>moveInkPointer(board,event));
+  canvas.addEventListener("pointerup",event=>finishInkPointer(board,event,true));
+  canvas.addEventListener("pointercancel",event=>finishInkPointer(board,event,false));
+  canvas.addEventListener("lostpointercapture",event=>finishInkPointer(board,event,false));
+  canvas.addEventListener("contextmenu",event=>event.preventDefault());
+  if(window.ResizeObserver){
+    board.resizeObserver=new ResizeObserver(()=>queueInkPaint(board));
+    board.resizeObserver.observe(paper);
+  }
+  paintInk(board);
+}
+function updateInkUndo(board) {
+  board.node.querySelector("[data-ink-undo]").disabled=!(board.data.strokes.length||board.history.length);
+}
+function refreshInk(board) {
+  updateInkUndo(board);
+  saveInk(board);
+  queueInkPaint(board);
+}
+function paintInk(board) {
+  if(!board.enabled&&!board.data.strokes.length){
+    board.canvas.width=1;board.canvas.height=1;
+    return;
+  }
+  const width=board.paper.clientWidth,height=board.paper.clientHeight;
+  if(!width||!height)return;
+  const scale=Math.min(window.devicePixelRatio||1,2,Math.sqrt(3000000/(width*height)),4096/Math.max(width,height));
+  const pixelsWide=Math.max(1,Math.round(width*scale)),pixelsHigh=Math.max(1,Math.round(height*scale));
+  const {canvas,ctx}=board;
+  if(canvas.width!==pixelsWide)canvas.width=pixelsWide;
+  if(canvas.height!==pixelsHigh)canvas.height=pixelsHigh;
+  ctx.setTransform(pixelsWide/width,0,0,pixelsHigh/height,0,0);
+  ctx.clearRect(0,0,width,height);
+  for(const stroke of board.data.strokes)drawInkStroke(ctx,stroke);
+  if(board.pointer?.stroke)drawInkStroke(ctx,board.pointer.stroke);
+}
+function drawInkStroke(ctx,{tool,points}) {
+  const style=inkStyles[tool],first=points[0];
+  if(!style||!first)return;
+  ctx.lineCap="round";
+  ctx.lineJoin="round";
+  ctx.lineWidth=style.width;
+  ctx.strokeStyle=style.colour;
+  ctx.beginPath();
+  ctx.moveTo(...first);
+  for(const point of points.slice(1))ctx.lineTo(...point);
+  if(points.length===1)ctx.lineTo(first[0]+.01,first[1]);
+  ctx.stroke();
+}
+function queueInkPaint(board) {
+  if(board.raf)return;
+  board.raf=requestAnimationFrame(()=>{
+    board.raf=0;
+    if(board.node.isConnected)paintInk(board);
+  });
+}
+function inkPoint(board,event) {
+  const rect=board.canvas.getBoundingClientRect();
+  const clamp=(value,max)=>Math.round(Math.max(0,Math.min(max,value))*10)/10;
+  return [clamp(event.clientX-rect.left,rect.width),clamp(event.clientY-rect.top,rect.height)];
+}
+function beginInkPointer(board,event) {
+  if(!board.enabled || (event.pointerType==="mouse"&&event.button!==0))return;
+  event.preventDefault();
+  if(event.pointerType==="touch"){
+    if(board.pointer||board.pan)return;
+    board.pan={id:event.pointerId,x:event.clientX,y:event.clientY};
+  }else{
+    if(board.pointer)return;
+    board.pan=null;
+    if(!board.data.width){
+      board.data.width=board.paper.clientWidth;
+      board.paper.style.width=board.data.width+"px";
+    }
+    const point=inkPoint(board,event);
+    board.pointer={id:event.pointerId,removed:[],stroke:board.tool==="eraser"?null:{tool:board.tool,points:[point]}};
+    if(board.tool==="eraser")eraseInkNear(board,point);
+    queueInkPaint(board);
+  }
+  try{board.canvas.setPointerCapture(event.pointerId);}catch{}
+}
+function moveInkPointer(board,event) {
+  if(board.pan?.id===event.pointerId){
+    const {x,y}=board.pan;
+    board.pan.x=event.clientX;
+    board.pan.y=event.clientY;
+    if(board.scroll.scrollWidth>board.scroll.clientWidth)board.scroll.scrollLeft+=x-event.clientX;
+    window.scrollBy(0,y-event.clientY);
+    return;
+  }
+  if(board.pointer?.id!==event.pointerId)return;
+  const events=event.getCoalescedEvents?.();
+  for(const sample of events?.length?events:[event])appendInkPoint(board,inkPoint(board,sample));
+  queueInkPaint(board);
+}
+function appendInkPoint(board, point){
+  const stroke=board.pointer.stroke;
+  if(!stroke){eraseInkNear(board,point);return;}
+  const last=stroke.points.at(-1);
+  if(Math.hypot(last[0]-point[0],last[1]-point[1])>=.8)stroke.points.push(point);
+}
+function finishInkPointer(board,event,includeEndpoint) {
+  if(board.pan?.id===event.pointerId){board.pan=null;return;}
+  if(board.pointer?.id!==event.pointerId)return;
+  if(includeEndpoint)appendInkPoint(board,inkPoint(board,event));
+  const {stroke,removed}=board.pointer;
+  board.pointer=null;
+  if(stroke){
+    board.data.strokes.push(stroke);
+    board.history.push({added:true});
+  }else if(removed.length){
+    board.history.push({removed});
+  }
+  if(stroke||removed.length)refreshInk(board);else queueInkPaint(board);
+}
+function distanceToInkSegment([x,y],[ax,ay],[bx,by]) {
+  const dx=bx-ax,dy=by-ay,length=dx*dx+dy*dy;
+  const t=length?Math.max(0,Math.min(1,((x-ax)*dx+(y-ay)*dy)/length)):0;
+  return Math.hypot(x-ax-dx*t,y-ay-dy*t);
+}
+function eraseInkNear(board,point){
+  const strokes=board.data.strokes;
+  for(let i=strokes.length-1;i>=0;i--){
+    const {tool,points}=strokes[i];
+    const radius=8+(inkStyles[tool]?.width||1)/2;
+    if(points.some((p,j)=>distanceToInkSegment(point,p,points[j-1]||p)<=radius)){
+      board.pointer.removed.push([i,...strokes.splice(i,1)]);
+      return;
+    }
+  }
+}
+function paperWorkspace(key) {
+  return '<details class="panel paper-workspace" data-paper-workspace="'+esc(key)+'"><summary>用 Pencil 标记真题</summary>'
+    +'<p class="meta">把原卷截图或复制的英文放到这里，就能在本站划线。材料和笔迹保存在当前浏览器。</p>'
+    +'<label class="field">真题原文<textarea data-paper-text maxlength="15000" placeholder="粘贴要标记的文章或题干"></textarea></label>'
+    +'<div class="line-up"><button type="button" class="soft" data-paper-load>载入英文原文</button>'
+    +'<label class="outline paper-upload">选真题截图<input type="file" accept="image/*" data-paper-file aria-label="选择真题截图"></label></div>'
+    +'<p class="meta" role="status" data-paper-status></p><div data-paper-output></div></details>';
+}
+function openPaperDatabase() {
+  if(!paperDatabase)paperDatabase=new Promise(resolve=>{
+    if(!window.indexedDB){resolve(null);return;}
+    const request=indexedDB.open("cet6-reading-material",1);
+    request.onupgradeneeded=()=>request.result.createObjectStore("papers");
+    request.onsuccess=()=>resolve(request.result);
+    request.onerror=()=>resolve(null);
+    request.onblocked=()=>resolve(null);
+  });
+  return paperDatabase;
+}
+async function readPaper(key) {
+  if(paperCache.has(key))return paperCache.get(key);
+  const db=await openPaperDatabase();
+  if(!db)return null;
+  return new Promise(resolve=>{
+    const request=db.transaction("papers").objectStore("papers").get(key);
+    request.onsuccess=()=>resolve(request.result??null);
+    request.onerror=()=>resolve(null);
+  });
+}
+async function savePaper(key,material) {
+  paperCache.set(key,material);
+  const db=await openPaperDatabase();
+  if(!db)return false;
+  return new Promise(resolve=>{
+    const transaction=db.transaction("papers","readwrite");
+    transaction.objectStore("papers").put(material,key);
+    transaction.oncomplete=()=>resolve(true);
+    transaction.onabort=()=>resolve(false);
+    transaction.onerror=()=>resolve(false);
+  });
+}
+function paperFingerprint(text){
+  let hash=2166136261;
+  for(let i=0;i<text.length;i++)hash=Math.imul(hash^text.charCodeAt(i),16777619);
+  return (hash>>>0).toString(36)+"-"+text.length;
+}
+function showPaperMaterial(node,material){
+  if(!node.isConnected||!material)return;
+  const output=node.querySelector("[data-paper-output]");
+  const boardKey=node.dataset.paperWorkspace+"-"+material.id;
+  if(material.text){
+    output.innerHTML=inkMarkup(boardKey,'<p class="ink-imported-text en" lang="en-GB">'+esc(material.text)+'</p>');
+  }else{
+    output.innerHTML=inkMarkup(boardKey,'<img class="ink-image" alt="待标记的真题截图">');
+    const image=output.querySelector("img"),url=URL.createObjectURL(material.image);
+    image.addEventListener("load",()=>URL.revokeObjectURL(url),{once:true});
+    image.addEventListener("error",()=>{
+      URL.revokeObjectURL(url);
+      node.querySelector("[data-paper-status]").textContent="这张图无法显示。请选择 PNG 或 JPG 截图。";
+    },{once:true});
+    image.src=url;
+  }
+  syncInkBoards();
+}
+function mountPaperWorkspace(node){
+  node.dataset.paperMounted="";
+  const key=node.dataset.paperWorkspace;
+  const textarea=node.querySelector("[data-paper-text]");
+  const status=node.querySelector("[data-paper-status]");
+  let revision=0;
+  async function setMaterial(material){
+    const load=++revision;
+    showPaperMaterial(node,material);
+    const saved=await savePaper(key,material);
+    if(load===revision)status.textContent=saved?"已载入。点「开始标记」就能划线。":"已载入。此浏览器暂时无法保存这份材料。";
+  }
+  const restore=async ()=>{
+    const material=await readPaper(key);
+    if(revision||!material||!node.isConnected)return;
+    if(material.text&&!textarea.value)textarea.value=material.text;
+    showPaperMaterial(node,material);
+  };
+  if(node.open)restore();
+  else node.addEventListener("toggle",restore,{once:true});
+  node.querySelector("[data-paper-load]").addEventListener("click",()=>{
+    const text=textarea.value.trim();
+    if(!text){status.textContent="请先粘贴一段英文原文。";return;}
+    setMaterial({id:"text-"+paperFingerprint(text),text});
+  });
+  node.querySelector("[data-paper-file]").addEventListener("change",event=>{
+    const file=event.target.files[0];
+    if(!file)return;
+    if(file.size>16*1024*1024){status.textContent="请选择 16 MB 以内的截图。";return;}
+    setMaterial({id:"image-"+paperFingerprint(file.name+":"+file.size+":"+file.lastModified),image:file});
+    event.target.value="";
+  });
+}
+
+</script>
+<script>
+"use strict";
+
 const dailyReadingMinutes=8;
 const letters="ABCD";
 function dailyReadingQuestions(day) {
@@ -1297,7 +1632,7 @@ function exerciseHTML(kind,day) {
   const reading=kind==="learning",article=WORD_READINGS[day-1];
   const passage=reading?'<article class="panel passage-study"><div class="line-up"><h3 lang="en-GB">'+esc(title)+'</h3>'+audioButton(title)+'</div>'
     +'<div class="line-up"><button class="soft" type="button" data-reading-start>开始阅读 '+dailyReadingMinutes+' 分钟</button><strong class="timer passage-clock" id="daily-reading-clock">08:00</strong></div>'
-    +article.paragraphs.map((p,i)=>'<div class="passage-paragraph"><span class="meta passage-paragraph-number" aria-label="第 '+(i+1)+' 段">'+(i+1)+'</span><div>'+(stored?english(p):english(p,[],{plain:true}))+'</div></div>').join("")+'</article>':"";
+    +inkMarkup("learning-"+day,article.paragraphs.map((p,i)=>'<div class="passage-paragraph"><span class="meta passage-paragraph-number" aria-label="第 '+(i+1)+' 段">'+(i+1)+'</span><div>'+(stored?english(p):english(p,[],{plain:true}))+'</div></div>').join(""))+'</article>':"";
   const result=stored?'<div class="panel exercise-result"><h3>'+stored.score+' / '+questions.length+(reading&&stored.seconds!==null?' · '+mmss(stored.seconds*1000):"")+'</h3><div class="line-up">'
     +'<button class="dark" type="button" data-copy="exercise:'+kind+'">复制 '+(reading?"50 词阅读":"旧知识复测")+'给教练</button><button class="outline" type="button" data-retry-exercise="'+kind+'">再做一遍</button></div></div>':"";
   return passage+result+'<form data-exercise="'+kind+'">'+exerciseRows(questions,stored,draft)
@@ -1326,6 +1661,7 @@ function markExercise(kind,day,form) {
 function refreshExercise(kind,day) {
   const box=$("#"+kind+"-panel");
   if(box){box.innerHTML=(kind==="old"?'<h3>短语、语法、翻译与长句</h3>':"")+exerciseHTML(kind,day);($("#"+kind+"-panel .exercise-result")||box).scrollIntoView({block:"center"});}
+  syncInkBoards();
   tickDailyReading();
 }
 function tickDailyReading(){
@@ -1575,7 +1911,7 @@ function quiz(n) {
   const score = stored?.score;
   const errors = stored ? [...new Set(qs.filter((q,i)=>stored.answers[i]!==q.correct).map(q=>q.type))] : [];
   const results = stored ? '<div class="panel tone-stack"><h3>'+score+' / 10</h3><p>'+(errors.length?errors.map(e=>esc(e+" · "+practiceTip[e])).join("<br>"):"这轮十题都答对了。用卷面原文核验一次定位过程。")+'</p><div class="line-up"><button class="soft" data-action="retry">重新做本日小测</button><button class="outline" data-copy="quiz">复制 10 题小测给教练</button>'+dayBtn(n+1,"进入第 "+(n+1)+" 天","dark")+'</div></div>' : "";
-  const passage = '<article class="panel quiz-passage"><h3>第 8–10 题 · 阅读短文</h3><p class="meta">读这段短文，再做下面 3 题。</p>'+l.passage.flatMap(p=>p.split("\n")).map(p=>english(p)).join("")+'</article>';
+  const passage = '<article class="panel quiz-passage"><h3>第 8–10 题 · 阅读短文</h3><p class="meta">读这段短文，再做下面 3 题。</p>'+inkMarkup("quiz-"+n,l.passage.flatMap(p=>p.split("\n")).map(p=>english(p)).join(""))+'</article>';
   return '<div id="quiz-content">'+results+'<form id="quiz-form"><h3>第 1–7 题 · 独立作答</h3><p class="meta">第 1–4 题直接看各自题干里的英文例句。第 5–7 题按各自题干作答。</p>'+qs.map((q,i)=>{
     const correct=stored && stored.answers[i]===q.correct;
     const voice = optionVoice(q.prompt);
@@ -1657,7 +1993,7 @@ function mock(n) {
   const p=plans[n-13],last=state.mocks[n],budget=mockBudget(n),scope=readingScope(mockReadingGroups);
   const readTimer='<div><h3>阅读计时 · 第 26–55 题</h3><div id="clock" class="timer" aria-label="阅读剩余时间">40:00</div><p id="timer-status" class="meta"></p><div class="line-up"><button data-action="start" class="dark">开始阅读 40 分钟</button><button data-action="stop" class="outline">结束阅读计时</button></div></div>';
   const answerForm='<form id="mock-form" class="real-form">'+["26–35 · Section A 选词填空","36–45 · Section B 长篇匹配","46–55 · Section C 仔细阅读"].map((label,i)=>'<label class="field">'+label+'<input type="text" spellcheck="false" required maxlength="35" name="m'+i+'" value="'+esc(last?.answers.slice(i*10,i*10+10) || "")+'" placeholder="输入 10 个字母，空题填 -"></label>').join("")+'<button class="dark" type="submit">核对阅读答案</button></form>';
-  const readBoard='<div class="panel"><div class="grid2"><div><h3>'+esc(p[1])+'</h3>'+exactPaperRoute(scope)+ext(examLink(n,"?layout=long"+textFragment(readingPart)),"打开整套阅读 · 26–55 题","dark")+'</div>'+readTimer+'</div>'+answerForm+'<div id="mock-result">'+mockResult(n)+'</div><details><summary>记真题生词</summary>'+noteForm()+'</details></div>';
+  const readBoard='<div class="panel"><div class="grid2"><div><h3>'+esc(p[1])+'</h3>'+exactPaperRoute(scope)+ext(examLink(n,"?layout=long"+textFragment(readingPart)),"打开整套阅读 · 26–55 题","dark")+'</div>'+readTimer+'</div>'+paperWorkspace("mock-"+n)+answerForm+'<div id="mock-result">'+mockResult(n)+'</div><details><summary>记真题生词</summary>'+noteForm()+'</details></div>';
   return '<div class="day-header"><div class="day-top"><div><div class="hero-kicker">第 '+n+' 天 · 真题模考</div><h1>'+esc(p[1])+'</h1><p>'+esc(p[2])+' · '+esc(budgetSummary(budget))+'</p></div>'+daySelect(n)+'</div></div>'
     +(n===17?section("integrated","完整笔试验收","130 分钟含听力。按写作、听力、阅读、翻译的顺序完成。",finalExamBoard()):"")
     +section("mock-read","真题阅读 · 40 分钟","同一套卷的原题、倒计时、答题和订正在这里。",readBoard)
@@ -1691,6 +2027,7 @@ function render() {
   document.querySelectorAll("#main-nav button").forEach(b=>(b.dataset.view===page || page==="mock"&&b.dataset.view==="diagnostic")?b.setAttribute("aria-current","page"):b.removeAttribute("aria-current"));
   $("#nav-errors").textContent = noteCount() ? " · "+noteCount() : "";
   if ($("#rate")) $("#rate").value = String(speed).replace(/^0\./,".");
+  syncInkBoards();
   tick();
 }
 function route(view,day=null, push=true) {
@@ -1898,7 +2235,7 @@ document.addEventListener("click",e=>{
     if(speech?.trim()) { b.dataset.speak=speech; speak(b);delete b.dataset.speak; }
     else toast("请先写下证据句。");
   }
-  if(d.action==="retry") { quizRetry=true;$("#quiz-content").outerHTML=quiz(current);$("#quiz").scrollIntoView(); }
+  if(d.action==="retry") { quizRetry=true;$("#quiz-content").outerHTML=quiz(current);syncInkBoards();$("#quiz").scrollIntoView(); }
   if(d.action==="start") {
     if(state.timer?.day===current && !state.timer.stopped && state.timer.end>Date.now()) return toast("本套正在计时。");
     const started=Date.now();state.timer={day:current,started,end:started+2400000};save();tick();
@@ -1963,7 +2300,7 @@ document.addEventListener("submit",e=>{
       else if(q.word){addNote(q.word);scheduleQuizMiss(q.word);}
     });
     state.tests[current]={answers,score,questions:qs};save();quizRetry=false;
-    $("#quiz-content").outerHTML=quiz(current);$("#quiz").scrollIntoView();
+    $("#quiz-content").outerHTML=quiz(current);syncInkBoards();$("#quiz").scrollIntoView();
     refreshVocab();refreshStudy();$("#nav-errors").textContent=noteCount()?" · "+noteCount():"";
   }
   if(f.id==="mock-form") {
