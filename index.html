@@ -414,7 +414,7 @@ const PHRASE_LOOKUP = {"a choice of":"各种各样可供选择的…","a class":
 "use strict";
 
 const lookupWordPattern=/[A-Za-z]+(?:[-'’][A-Za-z]+)*/g;
-const normalWord=s=>s.toLowerCase().replaceAll("’","'");
+const normalWord=s=>s.toLowerCase().replace(/’/g,"'");
 const normalWords=s=>(s.match(lookupWordPattern)||[]).map(normalWord);
 const manualPhrases={
   "according to":"根据；据……所述",
@@ -509,9 +509,9 @@ const compactGlosses={
 };
 function lookupEntry(word) {
   const key=normalWord(word);
-  const data=Object.hasOwn(WORD_LOOKUP,key)?WORD_LOOKUP[key]:undefined;
+  const data=hasOwn(WORD_LOOKUP,key)?WORD_LOOKUP[key]:undefined;
   const exact=vocab.get(key)||vocab.get(data?.[1]);
-  if(Object.hasOwn(compactGlosses,key))return {meaning:compactGlosses[key]};
+  if(hasOwn(compactGlosses,key))return {meaning:compactGlosses[key]};
   if(exact)return {meaning:exact[2]+" "+exact[3],base:key===exact[0]?"":exact[0],ipa:exact[1]};
   if(data)return {meaning:data[0],base:data[1]};
   if(key.endsWith("'s")){
@@ -773,7 +773,8 @@ function resumeDrill(day){
 function saveDrill(){
   if(!drill)return;
   const day=drill.day;
-  const daily=state.drillSessions[day] ||= {active:null,sessions:{}};
+  if(!state.drillSessions[day])state.drillSessions[day]={active:null,sessions:{}};
+  const daily=state.drillSessions[day];
   daily.active=drill.mode;
   daily.sessions[drill.mode]={...drill,repeats:[...drill.repeats],checkedSpelling:[...drill.checkedSpelling],first:[...drill.first]};
   save();
@@ -826,7 +827,7 @@ function finishDrillCard() {
 }
 function rateDrill(rating) {
   const entry=drill?.queue[0];
-  if(entry?.kind!=="word" || drill.answer || !Object.hasOwn(ratings,rating))return;
+  if(entry?.kind!=="word" || drill.answer || !hasOwn(ratings,rating))return;
   const {word,repeat}=entry;
   if(!drill.first.has(word)){
     drill.first.add(word);
@@ -888,7 +889,7 @@ function recallCard(word,w) {
     +Object.entries(ratings).map(([key,label])=>'<button type="button" class="'+(key==="remembered"?"dark":"outline")+'" data-recall-rate="'+key+'">'+label+'</button>').join("")
     +'<button type="button" class="outline" data-recall="reveal">先看词义</button></div>';
   return '<div class="line-up"><span class="chip">'+esc(tiers[w[6]])+'</span><span class="meta">'+drill.queue.length+' 张待自查</span></div>'
-    +'<div class="recall-word"><h3 lang="en-GB">'+esc(word)+'</h3>'+audioButton(word).replace('data-speak=','data-drill-voice data-speak=')+'</div><div class="ipa">/'+esc(w[1]).replaceAll(" / ","/ · /")+'/</div>'
+    +'<div class="recall-word"><h3 lang="en-GB">'+esc(word)+'</h3>'+audioButton(word).replace('data-speak=','data-drill-voice data-speak=')+'</div><div class="ipa">/'+esc(w[1]).replace(/ \/ /g,"/ · /")+'/</div>'
     +'<p class="meta recall-pos">词性 '+esc(w[2])+'</p>'
     +(drill.revealed?recallDetails(w):'<p class="muted">想一想这个词的意思，直接选。</p>')
     +(drill.answer?advanceButton():options);
@@ -1001,7 +1002,7 @@ function openStoryWord(key) {
   if(!popup || !w)return;
   const example=w[8],translation=w[9],form=w[10];
   popup.innerHTML='<div class="line-up popup-head"><h3 id="story-word-title" lang="en-GB">'+esc(w[0])+'</h3>'+audioButton(w[0])+'<button type="button" class="outline" data-close-story>关闭</button></div>'
-    +'<div class="ipa">/'+esc(w[1]).replaceAll(" / ","/ · /")+'/</div>'+wordRoot(key)+'<p><span class="chip">'+esc(w[2])+'</span> '+esc(w[3])+'</p>'
+    +'<div class="ipa">/'+esc(w[1]).replace(/ \/ /g,"/ · /")+'/</div>'+wordRoot(key)+'<p><span class="chip">'+esc(w[2])+'</span> '+esc(w[3])+'</p>'
     +english(example,[form],{phrases:true})+sentenceTranslation(translation)+wordContrast(key);
   if(popup.showModal)popup.showModal();
   else popup.setAttribute("open","");
@@ -1082,14 +1083,15 @@ function rangeLabel(start,key) {
   return start+"–"+(start+key.length-1);
 }
 function textFragment(lead) {
-  return lead?"#:~:text="+encodeURIComponent(lead).replaceAll("-","%2D"):"";
+  return lead?"#:~:text="+encodeURIComponent(lead).replace(/-/g,"%2D"):"";
 }
 function readingLink(task) {
   return taskLink(task,"?layout=long"+textFragment(task[6]||readingPart));
 }
 function readingScope(groups) {
   const first=groups[0][0];
-  const last=groups.at(-1)[0]+groups.at(-1)[1].length-1;
+  const [start,answers]=groups[groups.length-1];
+  const last=start+answers.length-1;
   const sections=readingSections.filter(([a,b])=>a<=last && b>=first);
   const number=first+"–"+last+" 题";
   if(sections.length===1){
@@ -1458,7 +1460,7 @@ function moveInkPointer(board,event) {
 function appendInkPoint(board, point){
   const stroke=board.pointer.stroke;
   if(!stroke){eraseInkNear(board,point);return;}
-  const last=stroke.points.at(-1);
+  const last=stroke.points[stroke.points.length-1];
   if(Math.hypot(last[0]-point[0],last[1]-point[1])>=.8)stroke.points.push(point);
 }
 function finishInkPointer(board,event,includeEndpoint) {
@@ -1700,6 +1702,7 @@ function realSectionReport(id) {
 "use strict";
 const $ = (query, root = document) => root.querySelector(query);
 const esc = (value = "") => String(value).replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
+const hasOwn = (value,key) => Object.prototype.hasOwnProperty.call(value,key);
 const name = "cet6-sprint-reading-v1";
 const tiers = ["必背", "次重点", "选背"];
 const tierClass = ["core", "mid", "extra"];
@@ -1731,7 +1734,7 @@ const practiceTip = {
 let state = {day:1,words:{},memory:{},exampleMode:"story",tests:{},notes:{},mocks:{},drafts:{},translations:{},timer:null,placed:{},recallMarks:{},spellMarks:{},realRuns:{},realTimers:{},integrated:null,drillSessions:{},autoPronounce:true,exerciseRuns:{},exerciseDrafts:{},exerciseTimers:{},blockDrafts:{}};
 try { state = {...state,...JSON.parse(localStorage.getItem(name) || "{}")}; } catch {}
 migrateDailyRuns();
-if(!Object.hasOwn(exampleModes,state.exampleMode))state.exampleMode="story";
+if(!hasOwn(exampleModes,state.exampleMode))state.exampleMode="story";
 let storageWarning = false;
 function save() {
   try { localStorage.setItem(name,JSON.stringify(state)); }
@@ -1822,7 +1825,7 @@ function wordCard(w, masked) {
   const {example,translation,label,form} = selectedExample(w);
   const exampleLine = english(example,[form],{phrases:true});
   const quote=SCREEN_WORD_LINES[word];
-  return '<article class="word"><div class="word-top"><div><h3 lang="en-GB">'+esc(word)+'</h3><div class="ipa">/'+esc(ipa).replaceAll(" / ","/ · /")+'/</div></div><div class="line-up"><span class="chip">'+esc(pos)+'</span><span class="chip '+tierClass[tier]+'">'+tiers[tier]+'</span>'+audioButton(word)+'</div></div>'
+  return '<article class="word"><div class="word-top"><div><h3 lang="en-GB">'+esc(word)+'</h3><div class="ipa">/'+esc(ipa).replace(/ \/ /g,"/ · /")+'/</div></div><div class="line-up"><span class="chip">'+esc(pos)+'</span><span class="chip '+tierClass[tier]+'">'+tiers[tier]+'</span>'+audioButton(word)+'</div></div>'
     +wordRoot(word)+(spellingWords.has(word)?'<span class="chip core">必会拼写</span>':"")
     +(masked?'<details class="example"><summary>查看英文例句 · '+label+'</summary>'+exampleLine+'</details>':'<div class="example"><span class="chip">'+label+'</span>'+exampleLine+'</div>')
     +'<details class="translation-toggle"><summary><span class="reveal-label">查看词义和例句翻译</span><span class="hide-label">收起中文</span></summary><div class="translation-content"><p><strong>词义</strong> '+esc(sense)+'</p><p><strong>例句</strong> '+esc(translation)+'</p></div></details>'
@@ -2054,7 +2057,7 @@ function restore() {
 function addNote(word,sense="",day=current) {
   const key=word.trim().toLowerCase();
   if(!/[a-z]/.test(key)) { toast("请输入英文词或短语。");return false; }
-  const note=Object.hasOwn(state.notes,key)?state.notes[key]:{days:[],sense:""};
+  const note=hasOwn(state.notes,key)?state.notes[key]:{days:[],sense:""};
   note.days=[...new Set([...note.days,day])]; note.sense=sense||note.sense;note.done=false;
   state.notes[key]=note;save();return true;
 }
@@ -2259,7 +2262,8 @@ document.addEventListener("input",e=>{
   const kind=el.form?.dataset.exercise;
   if(kind && el.name?.startsWith("p")){
     const key=exerciseKey(kind,current);
-    (state.exerciseDrafts[key] ||= [])[Number(el.name.slice(1))]=Number(el.value);
+    if(!state.exerciseDrafts[key])state.exerciseDrafts[key]=[];
+    state.exerciseDrafts[key][Number(el.name.slice(1))]=Number(el.value);
     save();
   }
   if(el.dataset.answerDraft) {state.blockDrafts[el.dataset.answerDraft]=el.value;save();}
@@ -2320,7 +2324,7 @@ document.addEventListener("submit",e=>{
     });
     const timer=state.timer?.day===current?state.timer:null;
     const seconds=timer?Math.max(0,Math.round(((timer.stopped??Date.now())-(timer.started??timer.end-2400000))/1000)):null;
-    if(timer)timer.stopped??=Date.now();
+    if(timer && timer.stopped==null)timer.stopped=Date.now();
     state.mocks[current]={answers,scores,wrong,causes,evidence,seconds};save();tick();
     $("#mock-result").innerHTML=mockResult(current);$("#mock-result").scrollIntoView();
   }
